@@ -68,11 +68,12 @@ local function git_log()
 
     local repo_root = get_git_root(file_path)
     local rel_path = relpath_from_root(file_path, repo_root)
+    local escaped_root = vim.fn.shellescape(repo_root)
 
     local prefix =
         'git -C '
-        .. vim.fn.shellescape(repo_root)
-        .. ' --no-pager log --follow --name-status --pretty=format:"hash: %H%ndate: %ad%nmessage: %s%n" --date=short '
+        .. escaped_root
+        .. ' -c core.quotepath=false --no-pager log --follow --name-status --pretty=format:"hash: %H%ndate: %ad%nmessage: %s%n" --date=short '
 
     local cmd = prefix .. vim.fn.shellescape(rel_path)
     local content = vim.fn.system(cmd)
@@ -85,6 +86,7 @@ local function git_log()
             if next(current_commit) then
                 table.insert(commits, current_commit)
             end
+
             current_commit = {
                 hash = line:match("^hash: (.+)$"),
                 repo_root = repo_root,
@@ -120,16 +122,45 @@ local function git_log()
         table.insert(commits, current_commit)
     end
 
+    local worktree_diff = vim.fn.system(string.format(
+        "git -C %s -c core.quotepath=false --no-pager diff --name-only HEAD -- %s",
+        escaped_root,
+        vim.fn.shellescape(rel_path)
+    ))
+
+    if worktree_diff and vim.trim(worktree_diff) ~= "" then
+        table.insert(commits, 1, {
+            hash = "WORKTREE",
+            date = os.date("%Y-%m-%d"),
+            message = "[Working tree vs HEAD]",
+            repo_root = repo_root,
+            path = rel_path,
+            is_worktree = true,
+        })
+    end
+
     return commits
 end
 
 local function git_diff(entry)
-    local cmd = string.format(
-        "git -C %s --no-pager diff %s^! -- %s",
-        vim.fn.shellescape(entry.repo_root),
-        entry.value,
-        vim.fn.shellescape(entry.path)
-    )
+    local root = entry.repo_root or get_git_root(vim.fn.expand("%:p"))
+    local escaped_root = vim.fn.shellescape(root)
+    local cmd
+
+    if entry.is_worktree then
+        cmd = string.format(
+            "git -C %s -c core.quotepath=false --no-pager diff HEAD -- %s",
+            escaped_root,
+            vim.fn.shellescape(entry.path)
+        )
+    else
+        cmd = string.format(
+            "git -C %s -c core.quotepath=false --no-pager diff %s^! -- %s",
+            escaped_root,
+            entry.value,
+            vim.fn.shellescape(entry.path)
+        )
+    end
 
     local result = vim.fn.system(cmd)
     if vim.v.shell_error ~= 0 then
@@ -184,25 +215,44 @@ local function git_file_history(opts)
                         },
                     })
 
+                    local short_hash = entry.is_worktree
+                        and "WORK"
+                        or string.sub(entry.hash or "", 1, 7)
+
+                    local date = entry.date or ""
+                    local message = entry.message or ""
+
                     return {
                         value = entry.hash,
                         display = function()
                             return displayer({
-                                { entry.date, "TelescopeResultsConstant" },
-                                { string.sub(entry.hash, 1, 7), "TelescopeResultsIdentifier" },
-                                entry.message,
+                                { date, "TelescopeResultsConstant" },
+                                { short_hash, "TelescopeResultsIdentifier" },
+                                message,
                             })
                         end,
-                        ordinal = entry.hash .. entry.date .. (entry.message or ""),
+                        ordinal = (entry.hash or "") .. date .. message,
                         path = entry.path,
                         repo_root = entry.repo_root,
+                        is_worktree = entry.is_worktree,
                     }
                 end,
             }),
             sorter = conf.file_sorter(opts),
+
             attach_mappings = function(prompt_bufnr, map)
                 local function open(cmd)
                     local selection = action_state.get_selected_entry()
+
+                    if selection.is_worktree then
+                        actions.close(prompt_bufnr)
+                        vim.notify(
+                            "Working tree entry cannot be opened via fugitive command",
+                            vim.log.levels.INFO
+                        )
+                        return
+                    end
+
                     local hash = selection.value
                     local path = selection.path
 
@@ -240,13 +290,32 @@ local function git_file_history(opts)
 
                 return true
             end,
+
             previewer = previewers.new_buffer_previewer({
                 title = "Diff for selected commit",
+
                 get_buffer_by_name = function(_, entry)
-                    return entry.value .. ":" .. entry.path
+                    return (entry.value or "WORKTREE")
+                        .. ":"
+                        .. (entry.path or "")
                 end,
+
                 define_preview = function(self, entry, _)
-                    if self.state.bufname == entry.value .. ":" .. entry.path then
+                    if not entry or not entry.path then
+                        vim.api.nvim_buf_set_lines(
+                            self.state.bufnr,
+                            0,
+                            -1,
+                            false,
+                            { "No file selected." }
+                        )
+                        return
+                    end
+
+                    local bufname =
+                        (entry.value or "WORKTREE") .. ":" .. entry.path
+
+                    if self.state.bufname == bufname then
                         return
                     end
 
