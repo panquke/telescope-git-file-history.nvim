@@ -19,6 +19,7 @@ local conf = require("telescope.config").values
 local finders = require("telescope.finders")
 local pickers = require("telescope.pickers")
 local previewers = require("telescope.previewers")
+local preview_utils = require("telescope.previewers.utils")
 local entry_display = require("telescope.pickers.entry_display")
 local gfh_actions = require("telescope._extensions.git_file_history.actions")
 local gfh_config = require("telescope._extensions.git_file_history.config")
@@ -28,11 +29,52 @@ local function is_git_directory()
     return result:sub(1, 4) == "true"
 end
 
+local function get_git_root(file_path)
+    local directory = vim.fn.fnamemodify(file_path, ":h")
+    local cmd = string.format(
+        "git -C %s rev-parse --show-toplevel",
+        vim.fn.shellescape(directory)
+    )
+    local root = vim.fn.system(cmd)
+
+    if vim.v.shell_error ~= 0 then
+        error("Failed to detect git root: " .. vim.trim(root))
+    end
+
+    return vim.trim(root)
+end
+
+local function relpath_from_root(file_path, root)
+    if root == "" or file_path == "" then
+        return file_path
+    end
+
+    if file_path:sub(1, #root) == root then
+        local rel = file_path:sub(#root + 1)
+        if rel:sub(1, 1) == "/" or rel:sub(1, 1) == "\\" then
+            rel = rel:sub(2)
+        end
+        return rel
+    end
+
+    return file_path
+end
+
 local function git_log()
-    local file_path = vim.fn.expand("%")
+    local file_path = vim.fn.expand("%:p")
+    if file_path == "" then
+        error("No file path available for git history")
+    end
+
+    local repo_root = get_git_root(file_path)
+    local rel_path = relpath_from_root(file_path, repo_root)
+
     local prefix =
-        'git --no-pager log --follow --name-status --pretty=format:"hash: %H%ndate: %ad%nmessage: %s%n" --date=short '
-    local cmd = prefix .. '"' .. file_path .. '"'
+        'git -C '
+        .. vim.fn.shellescape(repo_root)
+        .. ' --no-pager log --follow --name-status --pretty=format:"hash: %H%ndate: %ad%nmessage: %s%n" --date=short '
+
+    local cmd = prefix .. vim.fn.shellescape(rel_path)
     local content = vim.fn.system(cmd)
 
     local commits = {}
@@ -43,7 +85,10 @@ local function git_log()
             if next(current_commit) then
                 table.insert(commits, current_commit)
             end
-            current_commit = { hash = line:match("^hash: (.+)$") }
+            current_commit = {
+                hash = line:match("^hash: (.+)$"),
+                repo_root = repo_root,
+            }
         elseif line:match("^date:") then
             current_commit.date = line:match("^date: (.+)$")
         elseif line:match("^message:") then
@@ -51,15 +96,18 @@ local function git_log()
         elseif line:match("^%S") then
             local type, remainder = line:match("^(%S+)%s+(.+)$")
             current_commit.type = type
+
             if remainder then
                 local old_name, new_name = remainder:match("^(.-)\t(.*)$")
                 if not old_name or old_name == "" then
                     old_name = remainder
                     new_name = ""
                 end
+
                 current_commit.old_name = old_name and old_name:gsub("%s+$", "") or ""
                 current_commit.new_name = new_name and new_name:gsub("^%s+", "") or ""
-                current_commit.path = #current_commit.new_name > 0 and current_commit.new_name
+                current_commit.path = #current_commit.new_name > 0
+                    and current_commit.new_name
                     or current_commit.old_name
             end
         elseif line == "" and next(current_commit) then
@@ -75,8 +123,43 @@ local function git_log()
     return commits
 end
 
-local function git_show(entry)
-    return vim.fn.system("git --no-pager show " .. entry.value .. ":" .. '"' .. entry.path .. '"')
+local function git_diff(entry)
+    local cmd = string.format(
+        "git -C %s --no-pager diff %s^! -- %s",
+        vim.fn.shellescape(entry.repo_root),
+        entry.value,
+        vim.fn.shellescape(entry.path)
+    )
+
+    local result = vim.fn.system(cmd)
+    if vim.v.shell_error ~= 0 then
+        return nil, result
+    end
+
+    return result, nil
+end
+
+local function focus_first_hunk(bufnr)
+    local target = nil
+    local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+
+    for idx, line in ipairs(lines) do
+        if line:match("^@@")
+            or line:match("^%+[^+]")
+            or line:match("^%-[^-]")
+        then
+            target = idx
+            break
+        end
+    end
+
+    vim.api.nvim_buf_call(bufnr, function()
+        if target then
+            vim.api.nvim_win_set_cursor(0, { target, 0 })
+        else
+            vim.cmd("normal! gg")
+        end
+    end)
 end
 
 local function git_file_history(opts)
@@ -112,6 +195,7 @@ local function git_file_history(opts)
                         end,
                         ordinal = entry.hash .. entry.date .. (entry.message or ""),
                         path = entry.path,
+                        repo_root = entry.repo_root,
                     }
                 end,
             }),
@@ -128,18 +212,22 @@ local function git_file_history(opts)
                         .. hash
                         .. ":"
                         .. (path:find(" ") and ('"' .. path .. '"') or path)
+
                     vim.cmd(command)
                 end
 
                 action_set.select:replace(function()
                     open("Gedit ")
                 end)
+
                 actions.select_tab:replace(function()
                     open("Gtabedit ")
                 end)
+
                 actions.select_horizontal:replace(function()
                     open("Gsplit ")
                 end)
+
                 actions.select_vertical:replace(function()
                     open("Gvsplit ")
                 end)
@@ -153,7 +241,7 @@ local function git_file_history(opts)
                 return true
             end,
             previewer = previewers.new_buffer_previewer({
-                title = "File contents at commit",
+                title = "Diff for selected commit",
                 get_buffer_by_name = function(_, entry)
                     return entry.value .. ":" .. entry.path
                 end,
@@ -162,17 +250,28 @@ local function git_file_history(opts)
                         return
                     end
 
-                    local content = git_show(entry)
+                    local content, err = git_diff(entry)
+                    local lines
+
+                    if not content or content == "" then
+                        lines = {
+                            err and ("git diff failed: " .. vim.trim(err))
+                                or "No changes in this commit for file.",
+                        }
+                    else
+                        lines = vim.split(content, "\n", { plain = true })
+                    end
+
                     vim.api.nvim_buf_set_lines(
                         self.state.bufnr,
                         0,
                         -1,
                         false,
-                        vim.split(content, "\n")
+                        lines
                     )
 
-                    local ft = pfiletype.detect(entry.path, {})
-                    require("telescope.previewers.utils").highlighter(self.state.bufnr, ft)
+                    preview_utils.highlighter(self.state.bufnr, "diff")
+                    focus_first_hunk(self.state.bufnr)
                 end,
             }),
         })
