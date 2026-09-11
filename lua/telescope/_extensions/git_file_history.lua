@@ -241,7 +241,14 @@ local function git_file_history(opts)
             sorter = conf.file_sorter(opts),
 
             attach_mappings = function(prompt_bufnr, map)
-                local function open(cmd)
+                local function resume_picker()
+                    local ok, builtin = pcall(require, "telescope.builtin")
+                    if ok then
+                        pcall(builtin.resume)
+                    end
+                end
+
+                local function open(cmd, after_open)
                     local selection = action_state.get_selected_entry()
 
                     if selection.is_worktree then
@@ -264,6 +271,10 @@ local function git_file_history(opts)
                         .. (path:find(" ") and ('"' .. path .. '"') or path)
 
                     vim.cmd(command)
+
+                    if after_open then
+                        after_open()
+                    end
                 end
 
                 action_set.select:replace(function()
@@ -271,7 +282,10 @@ local function git_file_history(opts)
                 end)
 
                 actions.select_tab:replace(function()
-                    open("Gtabedit ")
+                    open("Gtabedit ", function()
+                        vim.cmd("tabprevious")
+                        resume_picker()
+                    end)
                 end)
 
                 actions.select_horizontal:replace(function()
