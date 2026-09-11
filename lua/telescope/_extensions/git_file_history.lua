@@ -130,6 +130,39 @@ local function git_log()
         table.insert(commits, current_commit)
     end
 
+    local stash_cmd = string.format(
+        'git -C %s -c core.quotepath=false --no-pager log -g refs/stash --format="%%gd%%x09%%H%%x09%%cs%%x09%%s" -- %s',
+        escaped_root,
+        vim.fn.shellescape(rel_path)
+    )
+
+    local stash_content = vim.fn.system(stash_cmd)
+
+    if vim.v.shell_error == 0 then
+        local stashes = {}
+
+        for line in stash_content:gmatch("[^\n]+") do
+            local stash_ref, hash, date, message =
+                line:match("^([^\t]+)\t([^\t]+)\t([^\t]+)\t(.*)$")
+
+            if stash_ref then
+                table.insert(stashes, {
+                    hash = hash,
+                    date = date,
+                    message = message,
+                    repo_root = repo_root,
+                    path = rel_path,
+                    is_stash = true,
+                    stash_ref = stash_ref,
+                })
+            end
+        end
+
+        for i = #stashes, 1, -1 do
+            table.insert(commits, 1, stashes[i])
+        end
+    end
+
     local worktree_diff = vim.fn.system(string.format(
         "git -C %s -c core.quotepath=false --no-pager diff --name-only HEAD -- %s",
         escaped_root,
@@ -163,6 +196,14 @@ local function git_diff(entry)
         cmd = string.format(
             "git -C %s -c core.quotepath=false --no-pager diff HEAD -- %s",
             escaped_root,
+            vim.fn.shellescape(entry.path)
+        )
+    elseif entry.is_stash then
+        cmd = string.format(
+            "git -C %s -c core.quotepath=false --no-pager diff %s^1 %s -- %s",
+            escaped_root,
+            entry.value,
+            entry.value,
             vim.fn.shellescape(entry.path)
         )
     else
@@ -230,14 +271,24 @@ local function git_file_history(opts)
                         separator = " ",
                         items = {
                             { width = 10 },
-                            { width = 7 },
+                            { width = 10 },
                             { remaining = true },
                         },
                     })
 
-                    local short_hash = entry.is_worktree
-                        and "WORK"
-                        or string.sub(entry.hash or "", 1, 7)
+                    local short_hash
+
+                    if entry.is_worktree then
+                        short_hash = "WORK"
+                    elseif entry.is_stash then
+                        short_hash = entry.stash_ref
+                    else
+                        short_hash = string.sub(
+                            entry.hash or "",
+                            1,
+                            7
+                        )
+                    end
 
                     local date = entry.date or ""
                     local message = entry.message or ""
@@ -260,7 +311,7 @@ local function git_file_history(opts)
                         end,
 
                         ordinal =
-                            (entry.hash or "")
+                            (entry.stash_ref or entry.hash or "")
                             .. date
                             .. message,
 
@@ -268,6 +319,8 @@ local function git_file_history(opts)
                         repo_root = entry.repo_root,
                         is_worktree = entry.is_worktree,
                         worktree_clean = entry.worktree_clean,
+                        is_stash = entry.is_stash,
+                        stash_ref = entry.stash_ref,
                     }
                 end,
             }),
