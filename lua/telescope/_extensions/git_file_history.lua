@@ -51,9 +51,11 @@ local function relpath_from_root(file_path, root)
 
     if file_path:sub(1, #root) == root then
         local rel = file_path:sub(#root + 1)
+
         if rel:sub(1, 1) == "/" or rel:sub(1, 1) == "\\" then
             rel = rel:sub(2)
         end
+
         return rel
     end
 
@@ -71,7 +73,7 @@ local function git_log()
     local escaped_root = vim.fn.shellescape(repo_root)
 
     local prefix =
-        'git -C '
+        "git -C "
         .. escaped_root
         .. ' -c core.quotepath=false --no-pager log --follow --name-status --pretty=format:"hash: %H%ndate: %ad%nmessage: %s%n" --date=short '
 
@@ -101,14 +103,20 @@ local function git_log()
 
             if remainder then
                 local old_name, new_name = remainder:match("^(.-)\t(.*)$")
+
                 if not old_name or old_name == "" then
                     old_name = remainder
                     new_name = ""
                 end
 
-                current_commit.old_name = old_name and old_name:gsub("%s+$", "") or ""
-                current_commit.new_name = new_name and new_name:gsub("^%s+", "") or ""
-                current_commit.path = #current_commit.new_name > 0
+                current_commit.old_name =
+                    old_name and old_name:gsub("%s+$", "") or ""
+
+                current_commit.new_name =
+                    new_name and new_name:gsub("^%s+", "") or ""
+
+                current_commit.path =
+                    #current_commit.new_name > 0
                     and current_commit.new_name
                     or current_commit.old_name
             end
@@ -128,16 +136,20 @@ local function git_log()
         vim.fn.shellescape(rel_path)
     ))
 
-    if worktree_diff and vim.trim(worktree_diff) ~= "" then
-        table.insert(commits, 1, {
-            hash = "WORKTREE",
-            date = os.date("%Y-%m-%d"),
-            message = "[Working tree vs HEAD]",
-            repo_root = repo_root,
-            path = rel_path,
-            is_worktree = true,
-        })
-    end
+    local has_worktree_diff =
+        worktree_diff and vim.trim(worktree_diff) ~= ""
+
+    table.insert(commits, 1, {
+        hash = "WORKTREE",
+        date = os.date("%Y-%m-%d"),
+        message = has_worktree_diff
+            and "[Working tree vs HEAD]"
+            or "[Working tree clean]",
+        repo_root = repo_root,
+        path = rel_path,
+        is_worktree = true,
+        worktree_clean = not has_worktree_diff,
+    })
 
     return commits
 end
@@ -163,6 +175,7 @@ local function git_diff(entry)
     end
 
     local result = vim.fn.system(cmd)
+
     if vim.v.shell_error ~= 0 then
         return nil, result
     end
@@ -172,7 +185,12 @@ end
 
 local function focus_first_hunk(bufnr)
     local target = nil
-    local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+    local lines = vim.api.nvim_buf_get_lines(
+        bufnr,
+        0,
+        -1,
+        false
+    )
 
     for idx, line in ipairs(lines) do
         if line:match("^@@")
@@ -203,8 +221,10 @@ local function git_file_history(opts)
     pickers
         .new(opts, {
             results_title = "Commits for current file",
+
             finder = finders.new_table({
                 results = git_log(),
+
                 entry_maker = function(entry)
                     local displayer = entry_display.create({
                         separator = " ",
@@ -224,39 +244,58 @@ local function git_file_history(opts)
 
                     return {
                         value = entry.hash,
+
                         display = function()
                             return displayer({
-                                { date, "TelescopeResultsConstant" },
-                                { short_hash, "TelescopeResultsIdentifier" },
+                                {
+                                    date,
+                                    "TelescopeResultsConstant",
+                                },
+                                {
+                                    short_hash,
+                                    "TelescopeResultsIdentifier",
+                                },
                                 message,
                             })
                         end,
-                        ordinal = (entry.hash or "") .. date .. message,
+
+                        ordinal =
+                            (entry.hash or "")
+                            .. date
+                            .. message,
+
                         path = entry.path,
                         repo_root = entry.repo_root,
                         is_worktree = entry.is_worktree,
+                        worktree_clean = entry.worktree_clean,
                     }
                 end,
             }),
+
             sorter = conf.file_sorter(opts),
 
             attach_mappings = function(prompt_bufnr, map)
                 local function resume_picker()
-                    local ok, builtin = pcall(require, "telescope.builtin")
+                    local ok, builtin =
+                        pcall(require, "telescope.builtin")
+
                     if ok then
                         pcall(builtin.resume)
                     end
                 end
 
                 local function open(cmd, after_open)
-                    local selection = action_state.get_selected_entry()
+                    local selection =
+                        action_state.get_selected_entry()
 
                     if selection.is_worktree then
                         actions.close(prompt_bufnr)
+
                         vim.notify(
                             "Working tree entry cannot be opened via fugitive command",
                             vim.log.levels.INFO
                         )
+
                         return
                     end
 
@@ -265,10 +304,15 @@ local function git_file_history(opts)
 
                     actions.close(prompt_bufnr)
 
-                    local command = cmd
+                    local command =
+                        cmd
                         .. hash
                         .. ":"
-                        .. (path:find(" ") and ('"' .. path .. '"') or path)
+                        .. (
+                            path:find(" ")
+                            and ('"' .. path .. '"')
+                            or path
+                        )
 
                     vim.cmd(command)
 
@@ -296,7 +340,9 @@ local function git_file_history(opts)
                     open("Gvsplit ")
                 end)
 
-                for mode, tbl in pairs(gfh_config.values.mappings) do
+                for mode, tbl in pairs(
+                    gfh_config.values.mappings
+                ) do
                     for key, action in pairs(tbl) do
                         map(mode, key, action)
                     end
@@ -305,64 +351,105 @@ local function git_file_history(opts)
                 return true
             end,
 
-            previewer = previewers.new_buffer_previewer({
-                title = "Diff for selected commit",
+            previewer =
+                previewers.new_buffer_previewer({
+                    title = "Diff for selected commit",
 
-                get_buffer_by_name = function(_, entry)
-                    return (entry.value or "WORKTREE")
-                        .. ":"
-                        .. (entry.path or "")
-                end,
+                    get_buffer_by_name = function(
+                        _,
+                        entry
+                    )
+                        return
+                            (entry.value or "WORKTREE")
+                            .. ":"
+                            .. (entry.path or "")
+                    end,
 
-                define_preview = function(self, entry, _)
-                    if not entry or not entry.path then
+                    define_preview = function(
+                        self,
+                        entry,
+                        _
+                    )
+                        if not entry or not entry.path then
+                            vim.api.nvim_buf_set_lines(
+                                self.state.bufnr,
+                                0,
+                                -1,
+                                false,
+                                {
+                                    "No file selected.",
+                                }
+                            )
+
+                            return
+                        end
+
+                        local bufname =
+                            (entry.value or "WORKTREE")
+                            .. ":"
+                            .. entry.path
+
+                        if self.state.bufname == bufname then
+                            return
+                        end
+
+                        local content, err =
+                            git_diff(entry)
+
+                        local lines
+
+                        if not content or content == "" then
+                            if entry.is_worktree
+                                and entry.worktree_clean
+                            then
+                                lines = {
+                                    "Working tree is clean for this file.",
+                                }
+                            else
+                                lines = {
+                                    err
+                                        and (
+                                            "git diff failed: "
+                                            .. vim.trim(err)
+                                        )
+                                        or "No changes in this commit for file.",
+                                }
+                            end
+                        else
+                            lines = vim.split(
+                                content,
+                                "\n",
+                                {
+                                    plain = true,
+                                }
+                            )
+                        end
+
                         vim.api.nvim_buf_set_lines(
                             self.state.bufnr,
                             0,
                             -1,
                             false,
-                            { "No file selected." }
+                            lines
                         )
-                        return
-                    end
 
-                    local bufname =
-                        (entry.value or "WORKTREE") .. ":" .. entry.path
+                        preview_utils.highlighter(
+                            self.state.bufnr,
+                            "diff"
+                        )
 
-                    if self.state.bufname == bufname then
-                        return
-                    end
-
-                    local content, err = git_diff(entry)
-                    local lines
-
-                    if not content or content == "" then
-                        lines = {
-                            err and ("git diff failed: " .. vim.trim(err))
-                                or "No changes in this commit for file.",
-                        }
-                    else
-                        lines = vim.split(content, "\n", { plain = true })
-                    end
-
-                    vim.api.nvim_buf_set_lines(
-                        self.state.bufnr,
-                        0,
-                        -1,
-                        false,
-                        lines
-                    )
-
-                    preview_utils.highlighter(self.state.bufnr, "diff")
-                    focus_first_hunk(self.state.bufnr)
-                end,
-            }),
+                        focus_first_hunk(
+                            self.state.bufnr
+                        )
+                    end,
+                }),
         })
         :find()
 end
 
 return telescope.register_extension({
     setup = gfh_config.setup,
+
     exports = {
         git_file_history = git_file_history,
         actions = gfh_actions,
